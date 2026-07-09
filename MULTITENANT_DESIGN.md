@@ -36,7 +36,7 @@ CREATE TABLE agents (
   waba_phone_number_id  TEXT,               -- para CTWA / Cloud API
   meta_page_id          TEXT,
   evolution_instance    TEXT,
-  autofill_phrase       TEXT,               -- "Hola, quiero vender mi camioneta" (attribution CTWA)
+  autofill_phrase       TEXT,               -- "Hola, quiero postular a ventas" (attribution CTWA)
 
   -- ── CEREBRO (lo que el user quiere variable) ──
   system_prompt   TEXT NOT NULL,            -- ⭐ el prompt, editable, NO hardcodeado

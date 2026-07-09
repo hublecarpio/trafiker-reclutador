@@ -20,7 +20,6 @@ import json
 import re
 import logging
 import os
-import zipfile
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -30,7 +29,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 
-from . import agenda, chatwoot, evolution, media
+from . import chatwoot, evolution, media
 from .agent import classify_alert, evaluate_candidate, extract_facts, generate_reply
 from .agent_config import get_agent_override
 from .config import settings
@@ -45,14 +44,14 @@ DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "doming
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("recruitbot")
 
-app = FastAPI(title="TuEmpresa Recruitment Bot")
+app = FastAPI(title="Framework de Trafiker Digital — Bot")
 
 DOCS_DIR = "/data/documents"
 
 # Roles que usan el flujo de revisión del reclutador (notificación de CV/audio + aprobación SI/NO).
 # Agrega aquí los slugs de tus roles que deben avisar al reclutador cuando llega un candidato.
 RECRUITER_REVIEW_ROLES = {"ejemplo-vendedor", "ejemplo-reclutador"}
-# Roles con agenda de entrevistas por slots (booking automático de horarios).
+# Roles con calendario de entrevistas por slots (booking automático de horarios).
 SCHEDULING_ROLES = {"ejemplo-vendedor"}
 
 redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
@@ -81,124 +80,8 @@ async def notify_recruiter(content: str, attachment_paths: list[str] | None = No
         return False
 
 
-async def _notify_flota_lead(db, applicant, conversation, chatwoot_conv_id, role_title, desc):
-    """Captación de FLOTA: le manda al dueño la descripción del carro + un ZIP con las fotos que
-    mandó el lead, para tenerlas a la mano. Dedup por cantidad de fotos: avisa al calificar y
-    re-envía si después llegan más fotos. No rompe la respuesta si falla."""
-    try:
-        docs = (await db.execute(
-            select(Document).where(Document.applicant_id == applicant.id).order_by(Document.id)
-        )).scalars().all()
-        photos = [d.local_path for d in docs if d.local_path and os.path.exists(d.local_path)]
-        try:
-            prev = await redis_client.get(f"flota_bundle:{conversation.id}")
-            prev_n = int(prev) if prev is not None else -1
-        except Exception:
-            prev_n = -1
-        # enviar si: primera calificación (hay desc y nunca se envió) o llegaron MÁS fotos que antes
-        if not ((desc is not None and prev_n < 0) or (len(photos) > prev_n)):
-            return
-        # Solo lo ESENCIAL: Marca/Modelo/Año/Km/Transmisión + fotos. Sin URL ni ficha completa.
-        parts = [p.strip() for p in (desc or "").split("|")]
-
-        def _g(i):
-            return parts[i] if i < len(parts) and parts[i] and parts[i] != "-" else ""
-        # ficha [CALIFICA]: 0 nombre | 1 marca | 2 modelo | 3 transmisión | 4 año | 5 km
-        marca, modelo, trans, anio, km = _g(1), _g(2), _g(3), _g(4), _g(5)
-        veh = " ".join(x for x in [marca, modelo, anio] if x) or (applicant.name or "vehículo")
-        km_txt = (km if "km" in km.lower() else f"{km} km") if km else ""
-        detalle = " · ".join(x for x in [km_txt, trans] if x)
-        lines = ["\U0001F697 *Carro para flota*" if desc else "\U0001F4F7 *Más fotos (flota)*", f"*{veh}*"]
-        if detalle:
-            lines.append(detalle)
-        lines.append(f"\U0001F4F1 {applicant.name or 'Lead'} · {applicant.phone or ''}")
-        lines.append(f"\U0001F4F7 {len(photos)} foto(s) adjuntas" if photos else "sin fotos todavía")
-        body = "\n".join(lines)
-        zip_path = None
-        if photos:
-            safe = "".join(ch for ch in (applicant.name or "lead") if ch.isalnum())[:20] or "lead"
-            zip_path = f"/tmp/flota_{conversation.id}_{safe}.zip"
-            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for i, p in enumerate(photos, 1):
-                    ext = os.path.splitext(p)[1] or ".jpg"
-                    zf.write(p, arcname=f"{safe}_{i}{ext}")
-        await notify_recruiter(body, attachment_paths=[zip_path] if zip_path else None)
-        await redis_client.set(f"flota_bundle:{conversation.id}", str(len(photos)), ex=60 * 60 * 24 * 30)
-    except Exception:
-        log.exception("no pude enviar el bundle de flota para conv %s", conversation.id)
-
-
-async def _materialize_fleet_unit(db, applicant, conversation, califica_info, disponibilidad_info):
-    """Marketplace de flota: crea/actualiza la fleet_unit del inventario a partir del lead
-    capta-flota calificado. Parsea la ficha del [CALIFICA], engancha sus fotos (Document.unit_id)
-    y registra las ventanas del [DISPONIBILIDAD]. status='pending' hasta que el dueño la apruebe."""
-    from .models import Document, FleetUnit, FleetWindow
-    from .date_logic import parse_availability
-    try:
-        unit = (await db.execute(select(FleetUnit).where(
-            FleetUnit.source_conversation_id == conversation.id))).scalar_one_or_none()
-        f = [x.strip() for x in (califica_info or "").split("|")]
-
-        def g(i):
-            return f[i] if i < len(f) and f[i] and f[i] != "-" else None
-
-        def num(s):
-            d = "".join(c for c in (s or "") if c.isdigit())
-            return int(d) if d else None
-
-        if unit is None:
-            unit = FleetUnit(slug=f"unit-{conversation.id}", source_conversation_id=conversation.id,
-                             owner_applicant_id=applicant.id, status="pending", ownership="consignment")
-            db.add(unit)
-        unit.owner_name = g(0) or applicant.name
-        unit.make, unit.model, unit.transmission = g(1), g(2), g(3)
-        unit.year, unit.km = num(g(4)), num(g(5))
-        unit.price_ref_usd = num(g(6))
-        unit.zone = g(7)
-        unit.owner_phone = applicant.phone
-        await db.flush()  # asigna unit.id
-        # enganchar las fotos del dueño a la unidad
-        docs = (await db.execute(select(Document).where(Document.applicant_id == applicant.id))).scalars().all()
-        photos = [d for d in docs if d.local_path]
-        for d in photos:
-            d.unit_id = unit.id
-        unit.photos_count = len(photos)
-        # ventanas de disponibilidad (solo la primera vez, evita duplicar)
-        if disponibilidad_info:
-            existing = (await db.execute(select(FleetWindow).where(
-                FleetWindow.fleet_unit_id == unit.id))).scalars().all()
-            if not existing:
-                av = parse_availability(disponibilidad_info)
-                if av["weekdays"]:
-                    db.add(FleetWindow(fleet_unit_id=unit.id, kind="available",
-                                       weekdays=",".join(str(w) for w in av["weekdays"]),
-                                       raw_text=disponibilidad_info))
-                for (s, e) in av["windows"]:
-                    db.add(FleetWindow(fleet_unit_id=unit.id, kind="available",
-                                       start_date=s.date(), end_date=e.date(), raw_text=disponibilidad_info))
-        await db.flush()
-    except Exception:
-        log.exception("no pude materializar fleet_unit para conv %s", conversation.id)
-
-
 DOC_MARKER = "[DOC]"  # marcador en el buffer para señales de archivo recibido
 KEY_TTL = 3600        # limpieza automática de claves redis
-
-# Fotos reales: el agente las envía cuando el cliente las pide (una sola vez por conversación).
-MAZDA_PHOTO_DIR = "/data/documents/mazda"
-MAZDA_PHOTOS = ["mazda_ext_1.jpg", "mazda_ext_2.jpg", "mazda_int_1.jpg", "mazda_int_2.jpg", "mazda_int_3.jpg"]
-# Fotos por rol de alquiler: {role_slug: (dir, [archivos], caption)}
-RENTAL_PHOTOS = {
-    "alquiler-mazda-cx5": (MAZDA_PHOTO_DIR, MAZDA_PHOTOS,
-                           "Te dejo unas fotos del Mazda CX-5 (exterior e interior) 🚙👇"),
-    "alquiler-territory": ("/data/documents/territory",
-                           ["Ford foto 1.png", "Ford foto 2.png", "Ford foto 3 tablero.png",
-                            "Ford foto 4 trasera.png", "Ford foto 5 interno.png", "Ford foto 6 maletera.png"],
-                           "Te dejo fotos reales del Ford Territory 2024 (exterior, tablero e interior) 🚙👇"),
-}
-# (el mapa rol→vehículo de la agenda vive en app/agenda.py: agenda.vehicle_for_role)
-PHOTO_INTENT_WORDS = ("foto", "fotos", "fotito", "imagen", "imagenes", "imágenes", "ver el carro",
-                      "ver la camioneta", "ver el auto", "ver el vehiculo", "ver el vehículo", "ver la unidad")
 
 # El cliente pide hablar con una PERSONA real → se alerta al WhatsApp personal del dueño.
 HUMAN_INTENT_WORDS = ("hablar con una persona", "con una persona", "con un humano", "un humano",
@@ -216,12 +99,8 @@ HUMAN_INTENT_WORDS = ("hablar con una persona", "con una persona", "con un human
                       "numero para llamar", "llamada telefónica", "prefiero llamar", "quiero que me llamen")
 
 # Etiqueta de Chatwoot por campaña/rol → diferencia los chats del bot (mismo número, varios usos).
-# Nombre amigable para los de autos; para el resto se usa el propio slug del rol.
-ROLE_LABELS = {
-    "alquiler-territory": "territory",
-    "alquiler-mazda-cx5": "mazda-cx5",
-    "capta-flota": "capta-flota",
-}
+# Por defecto se usa el propio slug del rol; agrega aquí un alias amigable si lo necesitas.
+ROLE_LABELS: dict[str, str] = {}
 
 
 def label_for_role(slug: str) -> str:
@@ -247,10 +126,6 @@ async def _startup():
     log.info("Reminder loop activo (confirma citas la noche previa a las %s:00 Lima)", settings.reminder_hour)
     asyncio.create_task(fallback_loop())
     log.info("Fallback loop activo (invitación de respaldo un-tap)")
-    asyncio.create_task(autos_lead_loop())
-    log.info("Autos lead loop activo (polling form Meta cada 5 min): %s", settings.autos_form_id)
-    asyncio.create_task(followup_loop())
-    log.info("Seguimiento loop activo (recontacta cotizados fríos de alquiler cada hora)")
     asyncio.create_task(escalation_answer_loop())
     log.info("Escalación loop activo (envía al cliente la respuesta que el dueño escribe en el link)")
 
@@ -547,7 +422,7 @@ def typing_delay(chunk: str) -> float:
 
 async def available_slots(db, role_slug: str, days_ahead: int = 5) -> list[datetime]:
     """Slots libres de lunes a viernes para los próximos N días hábiles.
-    La agenda es ÚNICA POR CAMPAÑA (role_slug): todas las entrevistas del mismo
+    El calendario es ÚNICO POR CAMPAÑA (role_slug): todas las entrevistas del mismo
     puesto comparten al gerente y la sala, así que un slot ocupado por cualquier
     candidato de la campaña bloquea a todos (sin importar su sede).
     Horarios desde settings.interview_slots (ej. '10:00,10:30'), 20 min c/u."""
@@ -609,7 +484,7 @@ RECRUITER_HELP = (
     "• *SI <id>* — aprobar candidato y ofrecerle cita\n"
     "• *NO <id>* — rechazar candidato (no se le ofrece cita)\n"
     "• *PENDIENTES* — ver candidatos esperando tu aprobación\n"
-    "• *AGENDA* — ver citas agendadas\n"
+    "• *AGENDA* — ver citas programadas\n"
     "• *VER <id>* — leer la conversación completa de un candidato\n"
     "• *DALE* — disparar la invitación de respaldo pendiente\n"
     "• *AYUDA* — ver estos comandos"
@@ -634,7 +509,7 @@ def _interview_offer_msg(name: str, slots: list[datetime]) -> str:
 # ── Aprobación de candidatos: lógica COMPARTIDA entre el comando de WhatsApp ('SI/NO <id>')
 #    y los endpoints /internal usados por el DASHBOARD. Un solo lugar = mismo comportamiento. ──
 async def _approve_applicant(db, aid: int) -> dict:
-    """Aprueba: marca approved_for_interview=True y, si el rol usa agenda por slots,
+    """Aprueba: marca approved_for_interview=True y, si el rol usa calendario por slots,
     OFRECE los horarios al candidato; si no, le avisa que pasó (Meet). Igual que 'SI <id>'."""
     applicant = (await db.execute(select(Applicant).where(Applicant.id == aid))).scalar_one_or_none()
     if not applicant:
@@ -747,7 +622,7 @@ async def handle_recruiter_command(content: str, recruiter_conv_id: int) -> dict
                 lines = [f"• *{a.name}* — score {a.eval_score} — id *{a.id}*\n  sede: {a.sede or '?'} | {a.phone}"
                          for a in rows]
                 await reply("📋 *Candidatos esperando tu aprobación:*\n\n" + "\n\n".join(lines) +
-                            "\n\nResponde *SI <id>* para agendar o *NO <id>* para descartar.")
+                            "\n\nResponde *SI <id>* para programar o *NO <id>* para descartar.")
             return {"ok": True, "recruiter_command": "pendientes", "count": len(rows)}
 
         # --- AGENDA ---
@@ -757,13 +632,13 @@ async def handle_recruiter_command(content: str, recruiter_conv_id: int) -> dict
                 .where(Interview.status == "scheduled").order_by(Interview.scheduled_at)
             )).all()
             if not rows:
-                await reply("📭 No hay citas agendadas.")
+                await reply("📭 No hay citas programadas.")
             else:
                 lines = [f"• {DIAS[iv.scheduled_at.astimezone(LIMA_TZ).weekday()].capitalize()} "
                          f"{iv.scheduled_at.astimezone(LIMA_TZ).strftime('%d/%m %H:%M')} — *{a.name}* ({a.phone}) — {iv.sede}"
                          for iv, a in rows]
-                await reply("📅 *Citas agendadas:*\n\n" + "\n".join(lines))
-            return {"ok": True, "recruiter_command": "agenda", "count": len(rows)}
+                await reply("📅 *Citas programadas:*\n\n" + "\n".join(lines))
+            return {"ok": True, "recruiter_command": "calendario", "count": len(rows)}
 
         # --- VER <id>: reenviar la conversación completa de Chatwoot ---
         if (m := _re.match(r"^VER\s+(\d+)$", text)):
@@ -904,7 +779,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
         scheduling_enabled = (role.slug in SCHEDULING_ROLES
                               and applicant.approved_for_interview is True)
         if scheduling_enabled:
-            slots = await available_slots(db, role.slug)  # agenda por campaña
+            slots = await available_slots(db, role.slug)  # calendario por campaña
             extra_ctx = slots_context(slots)
         elif role.slug in SCHEDULING_ROLES:
             extra_ctx = ("[IMPORTANTE]: este candidato AÚN NO está aprobado para entrevista. "
@@ -921,7 +796,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
             reply = role.intro
             applicant.stage = "informed_timeline"
         else:
-            # roles SIN intro (ej. vendedor-vehiculo por CTWA): el primer turno también
+            # roles SIN intro (ej. un rol de ventas por CTWA): el primer turno también
             # va al LLM, así nunca se manda un saludo vacío que deja al lead colgado.
             history = (await db.execute(
                 select(Message).where(Message.conversation_id == conversation.id).order_by(Message.id)
@@ -936,7 +811,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
             _enabled_tools = (_ov or {}).get("tools") or []
             _convtext = " ".join(h["content"] for h in hist if h["role"] == "user")
             if _enabled_tools:
-                # tools de LECTURA (fechas, disponibilidad de la agenda) → inyectan contexto duro
+                # tools de LECTURA (ej. fecha/hora local) → inyectan contexto duro
                 _toolctx = await run_tools(_enabled_tools,
                                            {"conv_text": _convtext, "role_slug": role.slug}, db)
                 if _toolctx:
@@ -963,24 +838,8 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
             if not reply:
                 reply = "¡Tu perfil encaja! 🙌 El equipo te escribe personalmente para los detalles."
 
-        # --- DISPONIBILIDAD: el dueño de flota dijo cuándo puede alquilar su carro (marcador interno) ---
-        disponibilidad_info = None
-        if reply and "[DISPONIBILIDAD" in reply:
-            dm = re.search(r"\[DISPONIBILIDAD:(.*?)\]", reply, re.DOTALL)
-            disponibilidad_info = (dm.group(1).strip() if dm else "")
-            reply = re.sub(r"\[DISPONIBILIDAD:?.*?\]", "", reply, flags=re.DOTALL).strip()
-
-        # --- RESERVAR: el cliente hizo el DEPÓSITO / mandó voucher → bloquear las fechas en la agenda ---
-        reservar_info = None
-        if reply and "[RESERVAR" in reply:
-            rm = re.search(r"\[RESERVAR:(.*?)\]", reply, re.DOTALL)
-            reservar_info = (rm.group(1).strip() if rm else "(reserva)")
-            reply = re.sub(r"\[RESERVAR:?.*?\]", "", reply, flags=re.DOTALL).strip()
-            if not reply:
-                reply = "¡Listo! Dejé tus fechas reservadas 🙌 El equipo te confirma en breve."
-
-        # --- HUMANO: el agente detectó algo que requiere a una persona (ej. otra unidad/flota) ---
-        # → manda su mensaje (ej. "lo revisamos con la flota") y luego PAUSA el bot para que el dueño
+        # --- HUMANO: el agente detectó algo que requiere a una persona real ---
+        # → manda su mensaje (ej. "lo revisa un asesor") y luego PAUSA el bot para que el dueño
         #   atienda sin que el bot interfiera. Marcador interno, el cliente NO lo ve.
         handoff_info = None
         if reply and "[HUMANO" in reply:
@@ -989,14 +848,6 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
             reply = re.sub(r"\[HUMANO:?.*?\]", "", reply, flags=re.DOTALL).strip()
             if not reply:
                 reply = "Déjame revisarlo con el equipo y un asesor te confirma las opciones por aquí 🙌"
-
-        # --- FOTOS: el agente pidió enviar las fotos reales del vehículo (marcador interno) ---
-        wants_photos = False
-        if reply and "[FOTOS]" in reply:
-            wants_photos = True
-            reply = reply.replace("[FOTOS]", "").strip()
-            if not reply:
-                reply = "¡Claro! Te paso unas fotos del auto 🚙"
 
         # --- envío humanizado: partir por párrafos y mandar uno por uno ---
         chunks = split_reply(reply)
@@ -1009,29 +860,9 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
             if i < len(chunks) - 1:
                 await asyncio.sleep(typing_delay(chunks[i + 1]))
 
-        # --- FOTOS reales del vehículo cuando el cliente las pide (una sola vez por conversación) ---
-        if role.slug in RENTAL_PHOTOS:
-            asked = " ".join(buffered).lower()
-            if wants_photos or any(w in asked for w in PHOTO_INTENT_WORDS):
-                try:
-                    already = await redis_client.get(f"rental_photos_sent:{conversation.id}")
-                except Exception:
-                    already = None
-                if not already:
-                    pdir, pfiles, caption = RENTAL_PHOTOS[role.slug]
-                    photo_paths = [f"{pdir}/{n}" for n in pfiles if os.path.exists(f"{pdir}/{n}")]
-                    if photo_paths:
-                        try:
-                            await chatwoot.send_message(chatwoot_conv_id, caption, attachment_paths=photo_paths)
-                            db.add(Message(conversation_id=conversation.id, direction="outgoing",
-                                           content=caption + f" [+{len(photo_paths)} fotos]"))
-                            await redis_client.set(f"rental_photos_sent:{conversation.id}", "1", ex=60 * 60 * 24 * 30)
-                        except Exception as e:
-                            log.exception("envío de fotos del vehículo falló: %s", e)
-
-        # --- HANDOFF HUMANO: el cliente pidió una persona, O el agente emitió [HUMANO] (ej. quiere
-        #     otra unidad/flota). En ambos casos PAUSAMOS el bot (deja de responder) para que el dueño
-        #     atienda sin interferencia, y le avisamos a su WhatsApp con el link al chat. ---
+        # --- HANDOFF HUMANO: el cliente pidió una persona, O el agente emitió [HUMANO]. En ambos
+        #     casos PAUSAMOS el bot (deja de responder) para que el dueño atienda sin interferencia,
+        #     y le avisamos a su WhatsApp con el link al chat. ---
         if wants_human or handoff_info:
             from datetime import datetime as _dt, timezone as _tz
             ult = next((b for b in reversed(buffered) if not b.startswith(DOC_MARKER)), "")
@@ -1053,7 +884,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
                          f"Motivo: {reason[:180]}\n"
                          f"El bot dejó de responder esta conversación. Atiéndela tú 👇\n"
                          f"👉 {chat_link}\n"
-                         f"(Para que el bot vuelva, reactívalo desde el panel de Autos.)")
+                         f"(Para que el bot vuelva, reactívalo desde el panel.)")
                 try:
                     await notify_recruiter(alert)
                     await redis_client.set(f"human_alert:{conversation.id}", "1", ex=60 * 60 * 24)
@@ -1091,16 +922,8 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
                 except Exception as e:
                     log.exception("no pude alertar escalación: %s", e)
 
-        # --- CAPTACIÓN DE FLOTA: lead calificado o llegaron fotos → mandarle al dueño la
-        #     descripción del carro + ZIP de fotos (con dedup por cantidad de fotos) ---
-        if role.slug == "capta-flota" and (califica_info or has_new_docs):
-            if califica_info:
-                await _materialize_fleet_unit(db, applicant, conversation, califica_info, disponibilidad_info)
-            await _notify_flota_lead(db, applicant, conversation, chatwoot_conv_id,
-                                     role.title, califica_info)
-
-        # --- LEAD CALIFICADO (mentoría/otros) → avisar al dueño para que cierre personalmente ---
-        if califica_info and role.slug != "capta-flota":
+        # --- LEAD CALIFICADO → avisar al dueño para que cierre personalmente ---
+        if califica_info:
             # Persistir: marca al applicant como 'calificado' y guarda la ficha, para que el lead
             # entre al EMBUDO del dashboard (etapa 'Calificado' = pasó el filtro) y a casos exitosos.
             applicant.stage = "calificado"
@@ -1123,45 +946,6 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
                     await redis_client.set(f"califica_alert:{conversation.id}", "1", ex=60 * 60 * 24 * 7)
                 except Exception as e:
                     log.exception("no pude alertar lead calificado: %s", e)
-
-        # --- RESERVA POR DEPÓSITO: el cliente mandó voucher → BLOQUEA las fechas + avisa para verificar ---
-        if reservar_info:
-            try:
-                rk = await redis_client.get(f"reservar_done:{conversation.id}")
-            except Exception:
-                rk = None
-            veh = agenda.vehicle_for_role(role.slug)
-            if not rk and veh and "reservar" in ((await get_agent_override(role.slug) or {}).get("tools") or []):
-                try:
-                    utext = " ".join(m.content or "" for m in (await db.execute(
-                        select(Message).where(Message.conversation_id == conversation.id,
-                                              Message.direction == "incoming").order_by(Message.id)
-                    )).scalars().all())
-                    # Las fechas del MARCADOR ([RESERVAR: ... | fechas | ...]) son las que el agente
-                    # ya confirmó con el cliente → priorízalas; el historial es respaldo.
-                    booking_text = f"{reservar_info} {utext}"
-                    booking = await agenda.reserve(db, veh, booking_text, applicant.phone, reservar_info[:200])
-                    chat_link = (f"{settings.chatwoot_url}/app/accounts/{settings.chatwoot_account_id}"
-                                 f"/conversations/{chatwoot_conv_id}")
-                    if booking:
-                        rango = f"{booking.start_date:%d/%m}→{booking.end_date:%d/%m}"
-                        alert = (f"\U0001F4B0 *DEPÓSITO / RESERVA — {role.title}*\n"
-                                 f"{applicant.name or 'Lead'} · {applicant.phone or ''}\n"
-                                 f"{reservar_info[:200]}\n"
-                                 f"📅 Reserva #{booking.id} {rango} → fechas BLOQUEADAS (estado: por verificar).\n"
-                                 f"✅ VERIFICA el voucher en tu BCP. Si es real: territory_agenda.py confirmar {booking.id}\n"
-                                 f"❌ Si es falso/no llega: territory_agenda.py cancelar {booking.id}\n"
-                                 f"\U0001F449 {chat_link}")
-                        await redis_client.set(f"reservar_done:{conversation.id}", "1", ex=60 * 60 * 24 * 30)
-                    else:
-                        # no se pudo bloquear (choque, sin fecha, o antes del piso) → avisar igual para revisar a mano
-                        alert = (f"⚠️ *DEPÓSITO sin poder reservar auto — {role.title}*\n"
-                                 f"{applicant.name or 'Lead'} · {applicant.phone or ''}\n"
-                                 f"{reservar_info[:200]}\n"
-                                 f"No pude bloquear las fechas (choque, sin fecha clara o antes del 25/06). Revísalo: {chat_link}")
-                    await notify_recruiter(alert)
-                except Exception as e:
-                    log.exception("reserva por depósito falló: %s", e)
 
         # transcript completo (incluye la respuesta que acabamos de dar)
         transcript = "\n".join(f"{m.direction}: {m.content}" for m in (await db.execute(
@@ -1212,7 +996,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
                     log.exception("no pude reenviar audio/video al reclutador")
 
         # --- ALERTA EN TIEMPO REAL: si el candidato manda una señal de riesgo (queja, desistimiento,
-        #     molestia, problema de agenda), avisar al reclutador a su personal con motivo + extracto.
+        #     molestia, problema de horario), avisar al reclutador a su personal con motivo + extracto.
         #     Dedupe 6h por candidato vía Redis para no spamear. ---
         incoming_text = "\n".join(b for b in buffered if not b.startswith(DOC_MARKER)).strip()
         if role.slug in RECRUITER_REVIEW_ROLES and incoming_text:
@@ -1298,7 +1082,7 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
                             applicant.stage = "interview_scheduled"
                             notified = await notify_recruiter_interview(applicant, sede, when)
                             iv.notified = notified
-                            log.info("CITA agendada: applicant %s → %s %s (notif=%s)",
+                            log.info("CITA programada: applicant %s → %s %s (notif=%s)",
                                      applicant.id, facts["fecha"], facts["hora"], notified)
                     except Exception as e:
                         log.exception("error guardando cita: %s", e)
@@ -1307,213 +1091,12 @@ async def _schedule_reply(db_conv_id: int, chatwoot_conv_id: int, role_slug: str
     log.info("replied conv %s (%s) — %s chunk(s), docs=%s", db_conv_id, role.slug, len(chunks), has_new_docs)
 
 
-# ---------- AUTOS: motor de leads del formulario Meta (compra de camionetas, crédito BCP) ----------
-
-async def _match_autos_lead(db, phone: str | None):
-    """¿El que escribe es un LEAD DE AUTOS al que le mandamos la plantilla (vino por form)?
-    Match por teléfono (últimos 9 dígitos). Solo si aún no tiene conversación."""
-    if not phone:
-        return None
-    digits = "".join(c for c in phone if c.isdigit())
-    if len(digits) < 8:
-        return None
-    cands = (await db.execute(select(Applicant).where(
-        Applicant.role_slug == settings.autos_role, Applicant.phone.isnot(None)))).scalars().all()
-    for a in cands:
-        ad = "".join(c for c in (a.phone or "") if c.isdigit())
-        if ad and (ad == digits or ad[-9:] == digits[-9:]):
-            has_conv = (await db.execute(
-                select(Conversation).where(Conversation.applicant_id == a.id))).scalar_one_or_none()
-            if has_conv is None:
-                return a
-    return None
-
-
-async def _autos_page_token() -> str | None:
-    if not settings.meta_token:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=20) as cl:
-            r = await cl.get(f"https://graph.facebook.com/v21.0/{settings.autos_page_id}",
-                             params={"fields": "access_token", "access_token": settings.meta_token})
-            return r.json().get("access_token")
-    except Exception:
-        log.exception("no pude obtener page token autos")
-        return None
-
-
-async def poll_autos_leads() -> int:
-    """Baja leads nuevos del formulario Meta, los guarda, avisa al personal e inicia el WhatsApp
-    con la plantilla del crédito BCP. Dedup por Redis (autos:processed)."""
-    ptoken = await _autos_page_token()
-    if not ptoken:
-        return 0
-    try:
-        async with httpx.AsyncClient(timeout=30) as cl:
-            r = await cl.get(f"https://graph.facebook.com/v21.0/{settings.autos_form_id}/leads",
-                             params={"access_token": ptoken, "fields": "id,created_time,field_data", "limit": 50})
-        leads = r.json().get("data", [])
-    except Exception:
-        log.exception("autos: no pude leer leads del form")
-        return 0
-    new = 0
-    tpl_status = await chatwoot.template_status(settings.autos_template)
-    for lead in leads:
-        lid = str(lead.get("id"))
-        try:
-            if await redis_client.sismember("autos:processed", lid):
-                continue
-        except Exception:
-            pass
-        f = {}
-        for fd in lead.get("field_data", []):
-            vals = fd.get("values") or []
-            f[fd.get("name")] = vals[0] if vals else ""
-        name = f.get("full_name") or f.get("nombre") or ""
-        phone = f.get("phone_number") or ""
-        veh = " ".join(x for x in (f.get("marca", ""), f.get("modelo", ""), f.get("anio", "")) if x).strip()
-        resumen_form = (f"FORM autos | {veh} | {f.get('km','?')} km | pide {f.get('precio','?')} | "
-                        f"{f.get('distrito','?')} | en venta: {f.get('tiempo_venta','?')}")
-        async with SessionLocal() as db:
-            applicant = Applicant(chatwoot_contact_id=None, name=name, phone=phone,
-                                  role_slug=settings.autos_role, stage="new", eval_notes=resumen_form)
-            db.add(applicant)
-            await db.commit()
-        # iniciar WhatsApp con la plantilla del crédito BCP (si está aprobada)
-        sent = False
-        if tpl_status == "APPROVED" and phone:
-            first = (name or "").split()[0] if name else "👋"
-            res = await chatwoot.send_whatsapp_template(phone, settings.autos_template,
-                                                        [first, veh or "tu camioneta"])
-            sent = bool(res and "error" not in res)
-        estado = ("✅ Ya le escribí por WhatsApp (plantilla BCP)." if sent
-                  else (f"⏳ Plantilla BCP {tpl_status} — le escribo apenas Meta apruebe."
-                        if tpl_status != "APPROVED" else "⚠️ No pude enviarle el WhatsApp aún."))
-        await notify_recruiter(
-            f"🚗 *NUEVO LEAD — vendedor de camioneta*\n👤 {name or '(sin nombre)'}\n📱 {phone or '?'}\n"
-            f"🚙 {veh or '?'}\n📍 {f.get('distrito','?')}\n🔢 {f.get('km','?')} km\n💵 Pide: {f.get('precio','?')}\n"
-            f"⏱ En venta: {f.get('tiempo_venta','?')}\n\n{estado}")
-        try:
-            await redis_client.sadd("autos:processed", lid)
-        except Exception:
-            pass
-        new += 1
-    return new
-
-
-async def autos_lead_loop():
-    """Cada 5 min revisa leads nuevos del formulario de autos."""
-    await asyncio.sleep(45)
-    while True:
-        try:
-            n = await poll_autos_leads()
-            if n:
-                log.info("autos: %s leads nuevos procesados", n)
-        except Exception:
-            log.exception("autos_lead_loop error")
-        await asyncio.sleep(300)
-
-
-@app.post("/cron/autos-leads")
-async def cron_autos_leads(request: Request):
-    if not _auth(request):
-        return {"ok": False, "error": "bad token"}
-    return {"ok": True, "new": await poll_autos_leads()}
-
-
-# ---------- SEGUIMIENTO automático de leads de alquiler que cotizaron y se enfriaron ----------
-FOLLOWUP_ROLES = ("alquiler-territory", "alquiler-mazda-cx5")
-FOLLOWUP_MAX_PER_RUN = 25
-
-
-async def followup_cold_quotes() -> int:
-    """Leads de alquiler que COTIZARON pero se enfriaron (último msg del bot, sin pausa, sin
-    reserva): les manda UN seguimiento. Dentro de 24h → texto libre; fuera → plantilla aprobada.
-    Una sola vez por conversación (dedup en redis)."""
-    async with SessionLocal() as db:
-        rows = (await db.execute(text("""
-            with lastmsg as (
-              select distinct on (conversation_id) conversation_id, direction, created_at
-              from messages order by conversation_id, id desc
-            ), lastin as (
-              select conversation_id, max(created_at) as last_in
-              from messages where direction='incoming' group by conversation_id
-            )
-            select c.id, c.chatwoot_conversation_id as cw, a.name, a.phone, li.last_in
-            from conversations c
-            join applicants a on a.id=c.applicant_id
-            join lastmsg lm on lm.conversation_id=c.id
-            left join lastin li on li.conversation_id=c.id
-            where c.role_slug = any(:roles)
-              and c.bot_paused = false
-              and lm.direction = 'outgoing'
-              and lm.created_at < now() - interval '2 hours'
-              and lm.created_at > now() - interval '8 days'
-              and exists(select 1 from messages mm where mm.conversation_id=c.id
-                         and mm.direction='outgoing' and mm.content ~ 'USD[[:space:]]*[0-9]')
-            order by lm.created_at desc
-        """), {"roles": list(FOLLOWUP_ROLES)})).all()
-
-    sent = 0
-    now = datetime.now(LIMA_TZ)
-    for r in rows:
-        if sent >= FOLLOWUP_MAX_PER_RUN:
-            break
-        try:
-            if await redis_client.get(f"followup_sent:{r.id}"):
-                continue
-        except Exception:
-            pass
-        name = (r.name or "").strip().split(" ")[0] if (r.name or "").strip() else ""
-        within24 = bool(r.last_in) and (now - r.last_in).total_seconds() < 24 * 3600
-        try:
-            if within24:
-                msg = (f"Hola{(' ' + name) if name else ''} 👋 ¿Avanzamos con tu reserva del Ford Territory? "
-                       f"Con la separación de S/100 te aseguro tus fechas 🚙 Cualquier duda, aquí estoy.")
-                await chatwoot.send_message(r.cw, msg)
-                logged = "[SEGUIMIENTO] " + msg
-            else:
-                rr = await chatwoot.send_whatsapp_template(
-                    r.phone, "territory_alquiler_seguimiento_v1", [name or "👋"], "es")
-                if rr and isinstance(rr, dict) and rr.get("error"):
-                    raise RuntimeError(str(rr["error"])[:120])
-                logged = "[SEGUIMIENTO plantilla territory_alquiler_seguimiento_v1]"
-            async with SessionLocal() as db2:
-                db2.add(Message(conversation_id=r.id, direction="outgoing", content=logged))
-                await db2.commit()
-            await redis_client.set(f"followup_sent:{r.id}", "1", ex=60 * 60 * 24 * 30)
-            sent += 1
-        except Exception:
-            log.exception("seguimiento falló conv %s", r.id)
-    return sent
-
-
-async def followup_loop():
-    """Cada hora revisa cotizados fríos y les manda seguimiento."""
-    await asyncio.sleep(150)
-    while True:
-        try:
-            n = await followup_cold_quotes()
-            if n:
-                log.info("seguimiento: %s leads fríos contactados", n)
-        except Exception:
-            log.exception("followup_loop error")
-        await asyncio.sleep(3600)
-
-
-@app.post("/cron/followups")
-async def cron_followups(request: Request):
-    if not _auth(request):
-        return {"ok": False, "error": "bad token"}
-    return {"ok": True, "contactados": await followup_cold_quotes()}
-
-
 # ---------- HANDOFF CON RESPUESTA: recoge lo que el dueño escribió y se lo manda al cliente ----------
 async def _polish_answer(question: str | None, answer: str | None, client_name: str | None) -> str | None:
     """Pule la respuesta del dueño como un mensaje de WhatsApp listo para el cliente (IA)."""
     from .agent import _chat
     prompt = (
-        "Eres el asistente de TuEmpresa Autos por WhatsApp. El cliente preguntó algo que el bot no supo, y el "
+        "Eres el asistente de la marca por WhatsApp. El cliente preguntó algo que el bot no supo, y el "
         "dueño te dio la respuesta correcta. Redáctala como un mensaje de WhatsApp cálido, claro y breve "
         "(1-3 líneas), español de Lima (tú), listo para enviar. NO agregues datos que no estén en la "
         "respuesta del dueño. NO uses JSON ni comillas ni marcadores.\n\n"
@@ -1652,23 +1235,14 @@ async def chatwoot_webhook(request: Request):
         if first_touch:
             # GATE ESTRICTO: solo si el mensaje contiene una frase clave de campaña.
             role = detect_role(content)
-            applicant = None
-            if role is None:
-                # ¿es un LEAD DE AUTOS al que le escribimos por la plantilla (vino del form)?
-                applicant = await _match_autos_lead(db, phone)
-                if applicant is not None:
-                    role = ROLES.get(settings.autos_role)
             if role is None:
                 log.info("no role-phrase match on conv %s — bot stays silent", conv_id)
                 return {"ok": True, "skipped": "no role phrase match"}
-            if applicant is None:
-                applicant = Applicant(
-                    chatwoot_contact_id=contact_id, name=name, phone=phone, role_slug=role.slug, stage="new"
-                )
-                db.add(applicant)
-                await db.flush()
-            elif contact_id and not applicant.chatwoot_contact_id:
-                applicant.chatwoot_contact_id = contact_id
+            applicant = Applicant(
+                chatwoot_contact_id=contact_id, name=name, phone=phone, role_slug=role.slug, stage="new"
+            )
+            db.add(applicant)
+            await db.flush()
             conversation = Conversation(
                 chatwoot_conversation_id=conv_id,
                 chatwoot_inbox_id=inbox_id,
@@ -1725,7 +1299,7 @@ async def chatwoot_webhook(request: Request):
         role_slug = conversation.role_slug
         await db.commit()
 
-    # --- acumular en redis + agendar respuesta con debounce ---
+    # --- acumular en redis + programar respuesta con debounce ---
     try:
         if incoming_content:
             await redis_client.rpush(f"buffer:{db_conv_id}", incoming_content)

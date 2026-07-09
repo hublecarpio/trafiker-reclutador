@@ -63,7 +63,7 @@ async def _ensure_account_labels(client: httpx.AsyncClient, labels: list[str]) -
 async def add_conversation_labels(conversation_id: int, labels: list[str]) -> bool:
     """Agrega etiquetas a una conversación de Chatwoot SIN borrar las existentes (las une), y se
     asegura de que existan como etiqueta de CUENTA para que se vean en la UI. Sirve para
-    diferenciar chats del bot (ej. 'territory', 'mazda-cx5') de otros usos del mismo número."""
+    diferenciar chats del bot (ej. por avatar/campaña) de otros usos del mismo número."""
     if not labels:
         return False
     base = (f"{settings.chatwoot_url.rstrip('/')}/api/v1/accounts/"

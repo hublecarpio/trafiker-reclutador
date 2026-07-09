@@ -2,7 +2,7 @@
 para que el agente (que solo lee texto) sepa qué llegó y pueda evaluar su contenido.
 
 - Audio  -> Whisper (OpenAI)      -> transcripción
-- Imagen -> Gemini Vision         -> descripción (sirve también para fotos de vehículos en Autos)
+- Imagen -> Gemini Vision         -> descripción (ej. fotos/documentos que envía el lead)
 - Video/otros -> etiqueta de tipo (sin procesar)
 
 Cada función falla suave (devuelve None / etiqueta básica) si no hay key o hay error.
@@ -49,7 +49,7 @@ async def describe_image(path: str, file_type: str | None = None) -> str | None:
         or mimetypes.guess_type(path)[0] or "image/jpeg"
     prompt = ("Describe en español, en 1-3 frases, qué se ve en esta imagen. "
               "Si es un documento (DNI, CV, comprobante) di qué documento es y los datos clave visibles. "
-              "Si es un vehículo, describe tipo, color y estado/daños visibles.")
+              "Si es un producto u objeto, describe tipo, color y estado visibles.")
     try:
         b64 = base64.b64encode(open(path, "rb").read()).decode()
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"

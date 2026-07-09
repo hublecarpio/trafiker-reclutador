@@ -1,6 +1,8 @@
 # SETUP — Despliegue end-to-end
 
-Guía paso a paso para poner el sistema en marcha. Referencia rápida de operación: `CLAUDE.md`.
+Guía paso a paso para poner el **Framework de Trafiker Digital** en marcha (WhatsApp Cloud API
++ Chatwoot + agentes IA + Higgsfield + dashboard con dominio propio). Referencia rápida de
+operación: `CLAUDE.md`.
 
 ---
 
@@ -8,8 +10,9 @@ Guía paso a paso para poner el sistema en marcha. Referencia rápida de operaci
 
 - Docker + Docker Compose en el servidor.
 - Un **Postgres** accesible (puede ser el que trae `docker-compose` si agregas uno, o uno externo).
-- Un **Chatwoot** con un **inbox de WhatsApp** (API oficial de WhatsApp Cloud recomendado).
-- Una **API key de OpenRouter** (LLM). Opcional: OpenAI (audio), Gemini (imágenes), token de Meta.
+- Un **Chatwoot** con un **inbox de WhatsApp Cloud API** (API oficial de Meta).
+- Una **API key de OpenRouter** (LLM). Opcional: **Higgsfield** (creativos de anuncio),
+  OpenAI (audio), Gemini (imágenes), token de Meta (gasto/CPL en el panel).
 
 ---
 
@@ -82,20 +85,22 @@ Vuelve a correr el seed cada vez que cambies `roles.py` (crea una versión nueva
 
 ---
 
-## 7. Despliega el dashboard
+## 7. Despliega el dashboard (con dominio personalizado)
 
-Servicio aparte, con su propio dominio y **basic-auth**.
+Servicio aparte, con su **propio dominio** y **basic-auth**.
 
 ```bash
-docker build -t recruitagent/dashboard:latest ./dashboard
+docker build -t trafiker/dashboard:latest ./dashboard
 ```
 
 - Pásale las mismas variables (`DATABASE_URL`, `CHATWOOT_*`, `META_TOKEN`, `DASH_USER`,
   `DASH_PASS`, `WEBHOOK_SECRET`, `BOT_INTERNAL_URL`, etc.).
-- Ponlo detrás de HTTPS. Para aprobar candidatos desde el panel, define `BOT_INTERNAL_URL`
-  (URL interna hacia el bot) y `WEBHOOK_SECRET` (el token viaja server-side, nunca al navegador).
-- `dashboard/stack.yml` trae un ejemplo de despliegue como stack de Swarm ruteado por Traefik;
-  adáptalo a tu infra o usa un simple `docker run` con las envs.
+- **Dominio propio:** en `dashboard/stack.yml`, cambia la regla de Traefik
+  `traefik.http.routers.botpanel.rule: "Host(`panel.example.com`)"` por tu dominio
+  (ej. `panel.tuagencia.com`) y apunta ese DNS al servidor. El `certresolver: le` emite el
+  TLS automático (HTTPS). Sin Swarm/Traefik, enruta el dominio al puerto 8000 con tu proxy.
+- Para aprobar leads desde el panel, define `BOT_INTERNAL_URL` (URL interna hacia el bot) y
+  `WEBHOOK_SECRET` (el token viaja server-side, nunca al navegador).
 
 ---
 

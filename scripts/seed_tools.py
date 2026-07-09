@@ -27,7 +27,7 @@ async def main():
         """, t["name"], t["label"], t["description"])
     # EJEMPLO (opcional): activar un tool en un agente por SQL. Descoméntalo y ajusta el
     # slug/tool a los tuyos. Normalmente esto se hace desde el dashboard con un check.
-    # await c.execute("""UPDATE agents SET tools='["tipo_cambio"]'::jsonb, updated_at=now()
+    # await c.execute("""UPDATE agents SET tools='["fecha_hora"]'::jsonb, updated_at=now()
     #                    WHERE slug='ejemplo-vendedor'""")
     print("tools_catalog:", [r["name"] for r in await c.fetch("SELECT name FROM tools_catalog")])
     await c.close()

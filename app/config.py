@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Agendamiento de entrevistas
     # sede -> slots diarios (hora de inicio, lunes a viernes)
     interview_slots: str = "10:00,10:30"   # 20 min c/u → máx 2 por día
-    interview_sede_enabled: str = "sede-principal"  # sedes con agenda activa
+    interview_sede_enabled: str = "sede-principal"  # sedes con calendario activo
     # Recordatorio automático la noche previa: hora (24h, hora local) en que se confirma la cita del día siguiente
     reminder_hour: int = 20   # 8 pm
 
@@ -61,12 +61,14 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     gemini_api_key: str = ""
 
-    # Leadgen opcional desde un formulario de Meta (lead ads). Deja vacío si no lo usas.
-    meta_token: str = ""      # token Graph para leer leads del formulario
-    autos_form_id: str = ""   # ID del formulario de Meta
-    autos_page_id: str = ""   # ID de la página dueña del formulario
-    autos_template: str = ""  # nombre de la plantilla de WhatsApp para el primer contacto
-    autos_role: str = ""      # slug del rol que atiende esos leads
+    # Token Graph de Meta (opcional). Lo usa el dashboard para leer gasto/CPL de las
+    # campañas y, si lo necesitas, leads de un formulario. Deja vacío si no lo usas.
+    meta_token: str = ""
+
+    # Higgsfield — generación de creativos (imágenes/videos) para los anuncios.
+    # Si la key queda vacía, el módulo devuelve un resultado "no configurado" sin romper nada.
+    higgsfield_api_key: str = ""
+    higgsfield_base_url: str = "https://api.higgsfield.ai"
 
     # Evolution API (WhatsApp Web/Baileys sobre un WhatsApp PERSONAL).
     # Sirve para recontactar candidatos FUERA de la ventana de 24h sin gastar plantillas:

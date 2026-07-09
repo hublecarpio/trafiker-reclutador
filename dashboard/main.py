@@ -214,7 +214,7 @@ def _camp_row(cp):
 @app.get("/api/successful")
 async def successful():
     """Casos donde el agente cumplió su objetivo = consiguió recursos del lead
-    (CV/portafolio, fotos del vehículo, docs del alquiler) o el reclutador lo aprobó.
+    (CV/portafolio, fotos, documentos que pidió el agente) o el reclutador lo aprobó.
     Incluye deep-link al chat de Chatwoot y las URLs de los adjuntos recibidos."""
     async with _pool.acquire() as c:
         rows = await c.fetch("""
@@ -516,7 +516,7 @@ RECRUITMENT_DEFAULT = [
     ("Enganchó",       False, _step_engaged),
     ("Mandó CV/audio", False, _step_docs),
     ("Pasó el filtro", True,  _step_approved),   # dorado: filtro del reclutador
-    ("Citado",         True,  _step_cited),      # dorado: entrevista agendada
+    ("Citado",         True,  _step_cited),      # dorado: entrevista programada
 ]
 
 # Embudo para roles de VENTAS/CALIFICACIÓN (sin CV; el hito es el marcador [CALIFICA]).
@@ -569,7 +569,7 @@ async def avatar(slug: str):
         approved = await c.fetchval("""
             select count(*) from applicants
             where role_slug=$1 and approved_for_interview is true""", slug)
-        # entrevistas agendadas = a futuro y no canceladas
+        # entrevistas programadas = a futuro y no canceladas
         try:
             interviews = await c.fetchval("""
                 select count(*) from interviews
@@ -1147,7 +1147,7 @@ async function load(){
    fr('Mensajes entran / responde',f.msgs_in+' / '+f.msgs_out)+
    fr('Docs recibidos (leads con ≥1)',f.docs_received)+
    fr('Aprobados p/ entrevista',f.approved)+
-   fr('Entrevistas agendadas',f.interviews_scheduled)+
+   fr('Entrevistas programadas',f.interviews_scheduled)+
    fr('Conv→Docs',pct(k.conv_to_docs_pct))+fr('Docs→Entrevista',pct(k.docs_to_interview_pct));
  $('stages').innerHTML=(f.stages&&f.stages.length)?
    '<table><tr><th>Etapa</th><th class=right>N°</th></tr>'+

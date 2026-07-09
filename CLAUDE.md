@@ -8,28 +8,31 @@ Habla siempre en **español peruano (tú, sin voseo)** con el usuario.
 
 ## 1. ¿Qué es esto?
 
-Un **CRM conversacional multi-agente** para reclutamiento y ventas por WhatsApp. Un
-anuncio manda gente a WhatsApp; un bot con IA los atiende, califica y guarda todo para
-que un humano decida. Un dashboard permite editar los prompts, aprobar candidatos y leer
-las conversaciones.
+El **Framework de Trafiker Digital**: automatiza captación y ventas por WhatsApp con
+agentes de IA. Está potenciado por **WhatsApp Cloud API + Chatwoot** (canal), **Higgsfield**
+(generación de creativos), **módulos de agentes IA** (cada agente = un avatar con su prompt)
+y un **dashboard con dominio personalizado**. Un anuncio manda gente a WhatsApp; un bot con
+IA los atiende, califica y guarda todo para que un humano decida.
 
 **Flujo de un mensaje:**
 
 ```
-Anuncio CTWA (Click-to-WhatsApp, con autofill pre-cargado)
-   → WhatsApp del negocio
+Anuncio CTWA (Click-to-WhatsApp; Higgsfield genera el creativo, autofill pre-cargado)
+   → WhatsApp Cloud API (el número del negocio)
    → Chatwoot (bandeja única)
    → webhook POST /webhook/chatwoot   (app FastAPI, app/main.py)
    → acumulador Redis (debounce ~15s: junta varios mensajes seguidos = más humano)
    → router de rol (detect_role): la frase-gatillo del autofill decide el AVATAR
-   → agente: system_prompt del rol + contexto → LLM (OpenRouter)
+   → agente IA: system_prompt del rol + contexto → LLM (OpenRouter)
+   → [CALIFICA]/[HUMANO] → aviso al dueño + persiste en Postgres
    → responde por la API de Chatwoot (parte la respuesta, simula tipeo)
-   → persiste en Postgres (applicants, conversations, messages, documents)
+   → dashboard (dominio propio): editar prompts, aprobar, ver el embudo
 ```
 
 **Piezas:**
-- `app/` — el bot FastAPI (webhook + loops de fondo: recordatorios, leads de Meta, recontacto).
-- `dashboard/` — panel FastAPI de lectura/acción (editar prompts, aprobar, ver chats). Servicio aparte.
+- `app/` — el bot FastAPI (webhook + loops de fondo: recordatorios, recontacto).
+- `app/higgsfield.py` — motor de creativos (imágenes/videos) para los anuncios.
+- `dashboard/` — panel FastAPI de lectura/acción con su propio dominio + basic-auth. Servicio aparte.
 - Postgres — el pipeline y la config de agentes. Redis — el acumulador/debounce.
 
 ---
@@ -84,6 +87,8 @@ Copia `.env.template` → `.env` y llena. `.env` está en `.gitignore` (**nunca 
 ### 🟢 OPCIONALES
 | Var | Para qué | ¿Secreto? |
 |---|---|---|
+| `HIGGSFIELD_API_KEY` | generación de creativos (imágenes/videos) para los anuncios | 🔒 sí |
+| `HIGGSFIELD_BASE_URL` | base URL de la API de Higgsfield (default razonable) | no |
 | `OPENAI_API_KEY` | transcribir audios de WhatsApp (Whisper) | 🔒 sí |
 | `GEMINI_API_KEY` | entender imágenes que envía el lead | 🔒 sí |
 | `EVOLUTION_URL` / `EVOLUTION_KEY` / `EVOLUTION_INSTANCE` | recontacto por WhatsApp personal fuera de 24h | 🔒 la KEY |
@@ -91,8 +96,7 @@ Copia `.env.template` → `.env` y llena. `.env` está en `.gitignore` (**nunca 
 | `DEBOUNCE_SECONDS` | segundos que acumula antes de responder | no |
 | `DASH_EXTRA_USERS` | usuarios extra del panel `u1:p1,u2:p2` | 🔒 sí |
 | `BOT_INTERNAL_URL` | URL bot↔dashboard para aprobar desde el panel | no |
-| `EVALUATION_DAYS`, `INTERVIEW_SLOTS`, `INTERVIEW_SEDE_ENABLED`, `REMINDER_HOUR` | timing de entrevistas/recordatorios | no |
-| `AUTOS_FORM_ID`, `AUTOS_PAGE_ID`, `AUTOS_TEMPLATE`, `AUTOS_ROLE` | leadgen desde formulario de Meta | no |
+| `EVALUATION_DAYS`, `INTERVIEW_SLOTS`, `INTERVIEW_SEDE_ENABLED`, `REMINDER_HOUR` | timing de reuniones/recordatorios | no |
 
 ---
 
@@ -150,12 +154,16 @@ python -m scripts.seed_tools           # crea tools_catalog (tools activables po
 curl localhost:8090/health
 ```
 
-**Dashboard (servicio aparte, su propio dominio + basic-auth):**
+**Dashboard (servicio aparte, con DOMINIO PERSONALIZADO + basic-auth):**
 ```bash
-docker build -t recruitagent/dashboard:latest ./dashboard
+docker build -t trafiker/dashboard:latest ./dashboard
 # despliega con su stack (ver dashboard/stack.yml) o docker run pasándole las mismas envs;
 # protégelo con DASH_USER/DASH_PASS y ponlo detrás de HTTPS.
 ```
+- **Dominio propio:** en `dashboard/stack.yml` cambia la regla de Traefik
+  `traefik.http.routers.botpanel.rule: "Host(`panel.example.com`)"` por tu dominio real
+  (ej. `panel.tuagencia.com`) y apunta ese DNS al servidor. El `certresolver: le` emite
+  el TLS automático. Sin Swarm/Traefik, usa tu reverse-proxy y enruta ese dominio al puerto 8000.
 
 ---
 
