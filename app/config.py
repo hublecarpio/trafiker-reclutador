@@ -61,9 +61,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     gemini_api_key: str = ""
 
-    # Token Graph de Meta (opcional). Lo usa el dashboard para leer gasto/CPL de las
-    # campañas y, si lo necesitas, leads de un formulario. Deja vacío si no lo usas.
+    # Token Graph de Meta (System User de Meta Business). Lo usa el dashboard para leer
+    # gasto/CPL de las campañas y, si lo necesitas, leads de un formulario.
     meta_token: str = ""
+    # Cuenta publicitaria a usar para lanzar campañas (formato act_XXXXXXXXX).
+    meta_ad_account_id: str = ""
 
     # Higgsfield — generación de creativos (imágenes/videos) para los anuncios.
     # Si la key queda vacía, el módulo devuelve un resultado "no configurado" sin romper nada.

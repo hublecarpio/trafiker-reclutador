@@ -11,8 +11,10 @@ Habla siempre en **español peruano (tú, sin voseo)** con el usuario.
 El **Framework de Trafiker Digital**: automatiza captación y ventas por WhatsApp con
 agentes de IA. Está potenciado por **WhatsApp Cloud API + Chatwoot** (canal), **Higgsfield**
 (generación de creativos), **módulos de agentes IA** (cada agente = un avatar con su prompt)
-y un **dashboard con dominio personalizado**. Un anuncio manda gente a WhatsApp; un bot con
-IA los atiende, califica y guarda todo para que un humano decida.
+y un **dashboard IP-first** (accesible por IP:8091 al toque; dominio propio con HTTPS es
+opcional vía Traefik). Un anuncio manda gente a WhatsApp; un bot con IA los atiende,
+califica y guarda todo para que un humano decida. **Postgres y Redis vienen dentro del
+stack** (no provisionas base de datos externa).
 
 **Flujo de un mensaje:**
 
@@ -32,7 +34,7 @@ Anuncio CTWA (Click-to-WhatsApp; Higgsfield genera el creativo, autofill pre-car
 **Piezas:**
 - `app/` — el bot FastAPI (webhook + loops de fondo: recordatorios, recontacto).
 - `app/higgsfield.py` — motor de creativos (imágenes/videos) para los anuncios.
-- `dashboard/` — panel FastAPI de lectura/acción con su propio dominio + basic-auth. Servicio aparte.
+- `dashboard/` — panel FastAPI de lectura/acción con basic-auth. Va en el stack (IP:8091); dominio propio opcional vía Traefik (`dashboard/stack.yml`).
 - Postgres — el pipeline y la config de agentes. Redis — el acumulador/debounce.
 
 ---
@@ -60,37 +62,47 @@ Anuncio CTWA (Click-to-WhatsApp; Higgsfield genera el creativo, autofill pre-car
 
 ---
 
-## 3. Variables de entorno por tier
+## 3. Variables de entorno (dos bloques)
 
-Copia `.env.template` → `.env` y llena. `.env` está en `.gitignore` (**nunca lo commitees**).
+Corre `./setup.sh` (crea `.env` y autogenera los secretos del panel) y luego llena SOLO
+las keys externas. `.env` está en `.gitignore` (**nunca lo commitees**). El modelo mental:
+**tú traes las keys externas; la infra (DB, caché, secretos del panel) se la provee/genera
+el stack.**
 
-### 🔴 OBLIGATORIAS (sin ellas no arranca / no responde)
+### 🔑 KEYS EXTERNAS (el CORE — las traes tú, de sus paneles)
 | Var | Qué es | ¿Secreto? |
 |---|---|---|
-| `DATABASE_URL` | Postgres (pipeline + agentes), driver asyncpg | 🔒 sí (lleva password) |
-| `REDIS_URL` | Redis del acumulador/debounce | no |
+| `HIGGSFIELD_API_KEY` | creativos (imágenes/videos) para los anuncios | 🔒 sí |
+| `META_TOKEN` | ads Graph API (System User de Meta Business); gasto/CPL + leads | 🔒 sí |
+| `META_AD_ACCOUNT_ID` | `act_XXXXXXXXX` — la cuenta publicitaria para lanzar campañas | no |
+| `OPENAI_API_KEY` | transcribir audios de WhatsApp (Whisper) | 🔒 sí |
+| `GEMINI_API_KEY` | entender imágenes que envía el lead | 🔒 sí |
+| `OPENROUTER_API_KEY` | cerebro del agente / LLM (OpenAI-compatible). Vacío = templated | 🔒 sí |
 | `CHATWOOT_URL` | URL de tu Chatwoot | no |
 | `CHATWOOT_ACCOUNT_ID` | ID de la cuenta de Chatwoot | no |
 | `CHATWOOT_TOKEN` | API access token de Chatwoot | 🔒 sí |
-| `OPENROUTER_API_KEY` | LLM (OpenAI-compatible). Vacío = respuestas templated | 🔒 sí |
+| `CHATWOOT_INBOX_ID` | inbox del número WhatsApp | no |
 | `RECRUITER_PHONE` | WhatsApp que recibe avisos de leads/CVs | dato personal |
-| `DASH_USER` | usuario del dashboard (basic-auth) | no |
-| `DASH_PASS` | clave del dashboard. Vacío = panel sin login (solo local) | 🔒 sí |
 
-### 🟡 SEGÚN USO
+### ⚙️ INFRA (interna / autogenerada — normalmente NO la tocas)
+| Var | Qué es | ¿Secreto? |
+|---|---|---|
+| `DATABASE_URL` | Postgres **INTERNO** del stack (`db:5432`); no provisionas DB externa | (interno) |
+| `REDIS_URL` | Redis **INTERNO** del stack (`redis:6379`); acumulador/debounce | (interno) |
+| `DASH_USER` | usuario del dashboard (basic-auth); default `admin` | no |
+| `DASH_PASS` | clave del dashboard. **Vacío → `setup.sh` lo autogenera** | 🔒 sí |
+| `WEBHOOK_SECRET` | protege el webhook (`?token=`) + aprobar desde el panel. **Vacío → `setup.sh` lo autogenera** | 🔒 sí |
+
+- **Postgres + Redis son servicios internos del stack** (Swarm/compose), sin puerto
+  publicado al host: no hay DB externa que provisionar y no chocan con nada del servidor.
+  Sus URLs por defecto ya apuntan a `db`/`redis` y el compose las fuerza a los internos.
+- **`DASH_PASS` y `WEBHOOK_SECRET` los autogenera `setup.sh`** (`openssl rand -hex 12`) si
+  quedan vacíos; es idempotente (no pisa lo ya puesto).
+
+### 🟢 OPCIONALES (defaults ok)
 | Var | Para qué | ¿Secreto? |
 |---|---|---|
-| `META_TOKEN` | leer leads del formulario de Meta y ver gasto/CPL en el panel | 🔒 sí |
-| `WEBHOOK_SECRET` | proteger el webhook (`?token=`) + aprobar desde el dashboard | 🔒 sí |
-| `CHATWOOT_INBOX_ID` | inbox desde el que se notifican/agendan las citas | no |
-
-### 🟢 OPCIONALES
-| Var | Para qué | ¿Secreto? |
-|---|---|---|
-| `HIGGSFIELD_API_KEY` | generación de creativos (imágenes/videos) para los anuncios | 🔒 sí |
 | `HIGGSFIELD_BASE_URL` | base URL de la API de Higgsfield (default razonable) | no |
-| `OPENAI_API_KEY` | transcribir audios de WhatsApp (Whisper) | 🔒 sí |
-| `GEMINI_API_KEY` | entender imágenes que envía el lead | 🔒 sí |
 | `EVOLUTION_URL` / `EVOLUTION_KEY` / `EVOLUTION_INSTANCE` | recontacto por WhatsApp personal fuera de 24h | 🔒 la KEY |
 | `LLM_MODEL` | id del modelo (default `openai/gpt-4.1-mini`) | no |
 | `DEBOUNCE_SECONDS` | segundos que acumula antes de responder | no |
@@ -140,46 +152,50 @@ Copia `.env.template` → `.env` y llena. `.env` está en `.gitignore` (**nunca 
 ## 6. Comandos
 
 ```bash
-cp .env.template .env            # 1) copia y llena las variables
-# levantar todo (bot + redis):
-docker compose up -d --build     # bot en :8090, redis en :16380
+./setup.sh                       # 1) crea .env y autogenera DASH_PASS/WEBHOOK_SECRET
+# 2) edita .env → pega tus keys externas
+# levantar TODO (Postgres + Redis + bot + dashboard):
+docker compose up -d --build     # bot en :8000, dashboard en :8091 (Postgres/Redis internos)
 docker compose build             # reconstruir tras cambiar código/roles
 docker compose logs -f recruitbot
 
-# seeds (corren dentro del contenedor o en un venv con las deps):
-python -m scripts.seed_agents_phase1   # crea tablas tenants/agents + siembra roles.py
-python -m scripts.seed_tools           # crea tools_catalog (tools activables por agente)
+# seeds (corren dentro del contenedor):
+docker compose exec recruitbot python -m scripts.seed_agents_phase1   # tablas tenants/agents + siembra roles.py
+docker compose exec recruitbot python -m scripts.seed_tools           # tools_catalog (tools activables por agente)
 
 # salud:
-curl localhost:8090/health
+curl localhost:8000/health
 ```
 
-**Dashboard (servicio aparte, con DOMINIO PERSONALIZADO + basic-auth):**
-```bash
-docker build -t trafiker/dashboard:latest ./dashboard
-# despliega con su stack (ver dashboard/stack.yml) o docker run pasándole las mismas envs;
-# protégelo con DASH_USER/DASH_PASS y ponlo detrás de HTTPS.
-```
-- **Dominio propio:** en `dashboard/stack.yml` cambia la regla de Traefik
-  `traefik.http.routers.botpanel.rule: "Host(`panel.example.com`)"` por tu dominio real
-  (ej. `panel.tuagencia.com`) y apunta ese DNS al servidor. El `certresolver: le` emite
-  el TLS automático. Sin Swarm/Traefik, usa tu reverse-proxy y enruta ese dominio al puerto 8000.
+**Dashboard (IP-first, incluido en el stack):** ya sube con `docker compose up -d` y queda
+en `http://IP-DEL-SERVIDOR:8091` (basic-auth `DASH_USER`/`DASH_PASS`). No hay que desplegar
+nada aparte para empezar.
+
+**Dominio propio (OPCIONAL, cuando quieras HTTPS con dominio):** usa `dashboard/stack.yml`
+(Swarm + Traefik). Cambia la regla `traefik.http.routers.botpanel.rule: "Host(`panel.example.com`)"`
+por tu dominio real y apunta ese DNS al servidor; el `certresolver: le` emite el TLS. Sin
+Swarm/Traefik, enruta el dominio al puerto 8000 del contenedor con tu reverse-proxy.
 
 ---
 
 ## 7. PRIMEROS PASOS (sigue esto al abrir el repo por primera vez)
 
-1. **Crea la base de datos** Postgres (vacía) y arma su `DATABASE_URL`.
+1. **Prepara el `.env`:** `./setup.sh` (crea `.env` y autogenera `DASH_PASS`/`WEBHOOK_SECRET`).
+   NO necesitas crear ninguna base de datos: Postgres y Redis los levanta el stack.
 2. **Chatwoot:** crea/identifica la cuenta y el **inbox** de WhatsApp; anota `CHATWOOT_ACCOUNT_ID`
    e `CHATWOOT_INBOX_ID` y genera un `CHATWOOT_TOKEN`.
-3. **Webhook:** en Chatwoot → Integrations → Webhooks, apunta a
-   `https://<tu-host>/webhook/chatwoot?token=<WEBHOOK_SECRET>`, evento *Message created*.
-4. **Llena `.env`:** `cp .env.template .env` y completa al menos las 🔴 obligatorias.
-5. **Define tus roles:** edita `app/roles.py` (reemplaza los dos ejemplos por tus avatares reales;
+3. **Llena `.env`:** pega SOLO tus **keys externas** (Higgsfield, Meta token + `META_AD_ACCOUNT_ID`,
+   OpenAI, Gemini, OpenRouter, Chatwoot, tu teléfono).
+4. **Define tus roles:** edita `app/roles.py` (reemplaza los dos ejemplos por tus avatares reales;
    cada uno con su frase-gatillo = el autofill del anuncio).
-6. **Siembra:** `python -m scripts.seed_agents_phase1` y `python -m scripts.seed_tools`.
-7. **Levanta el bot:** `docker compose up -d --build` y verifica `curl localhost:8090/health`.
-8. **Despliega el panel** con su dominio y basic-auth (`DASH_USER`/`DASH_PASS`).
+5. **Levanta TODO:** `docker compose up -d --build` (Postgres + Redis + bot + dashboard) y
+   verifica `curl localhost:8000/health`.
+6. **Siembra:** `docker compose exec recruitbot python -m scripts.seed_agents_phase1` y
+   `docker compose exec recruitbot python -m scripts.seed_tools`.
+7. **Abre el panel:** `http://IP-DEL-SERVIDOR:8091` (admin / la clave que imprimió `setup.sh`).
+   Dominio propio con HTTPS = opcional, luego con `dashboard/stack.yml`.
+8. **Webhook:** en Chatwoot → Integrations → Webhooks, apunta a
+   `http://<IP>:8000/webhook/chatwoot?token=<WEBHOOK_SECRET>`, evento *Message created*.
 9. **Primera campaña en PAUSA:** arma el anuncio CTWA con el autofill de un avatar, déjalo en
    pausa y **confirma con el usuario antes de activarlo**.
 

@@ -11,6 +11,23 @@ trabaje solo: menos clics perdidos, más leads calificados, todo en un panel.
 > Este repo está pensado para operarse con **Claude Code**: abre una sesión aquí y Claude
 > ya sabe cómo funciona, cómo desplegarlo y qué variables necesita. Lee **`CLAUDE.md`**.
 
+## Quick start (la ruta rápida)
+
+El stack trae su **propio Postgres y Redis** (no provisionas base de datos) y `setup.sh`
+autogenera los secretos del panel. Tú solo traes tus **keys externas**.
+
+```
+1. git clone <repo> && cd trafiker-reclutador
+2. ./setup.sh            # genera secretos del panel
+3. Edita .env → pega SOLO tus keys externas (Higgsfield, Meta token + act, OpenAI, Gemini, OpenRouter, Chatwoot, tu teléfono)
+4. docker compose up -d  # levanta Postgres + Redis + bot + dashboard
+5. Abre http://IP-DE-TU-SERVIDOR:8091  (usuario admin / la clave que imprimió setup.sh)
+   (dominio propio = opcional, luego con Traefik/stack.yml)
+6. Conecta el webhook de tu inbox Chatwoot → http://IP:8000/webhook/chatwoot
+```
+
+Paso a paso y qué es cada key: **`QUICKSTART.md`**.
+
 ## El stack
 
 - **WhatsApp Cloud API + Chatwoot** — el canal: recibe los mensajes y por ahí responde el bot.
@@ -46,27 +63,30 @@ trabaje solo: menos clics perdidos, más leads calificados, todo en un panel.
 
 ## Requisitos
 
-- Docker + Docker Compose
-- Un Postgres accesible y un Chatwoot con un inbox de **WhatsApp Cloud API**
-- Una API key de **OpenRouter** (para que el bot converse con IA)
-- (Opcional) `HIGGSFIELD_API_KEY` para generar creativos de anuncio
+- Docker + Docker Compose (el stack trae su **propio Postgres y Redis**, no provisionas DB).
+- Un **Chatwoot** con un inbox de **WhatsApp Cloud API**.
+- Una API key de **OpenRouter** (para que el bot converse con IA).
+- (Opcional) `HIGGSFIELD_API_KEY` para generar creativos de anuncio, `META_TOKEN` +
+  `META_AD_ACCOUNT_ID` para lanzar/medir campañas, OpenAI (audio), Gemini (imágenes).
 
-## Quickstart
+## Detalle
 
 ```bash
-cp .env.template .env        # llena al menos las variables 🔴 obligatorias
-# edita app/roles.py con tus avatares (los dos que vienen son ejemplos)
-docker compose up -d --build # bot en :8090
-python -m scripts.seed_agents_phase1   # siembra los agentes en la DB
-curl localhost:8090/health
+./setup.sh                   # crea .env y autogenera DASH_PASS/WEBHOOK_SECRET
+# edita .env → pega tus keys externas (ver QUICKSTART.md)
+docker compose up -d         # Postgres + Redis + bot (:8000) + dashboard (:8091)
+docker compose exec recruitbot python -m scripts.seed_agents_phase1   # siembra los agentes
+curl localhost:8000/health
 ```
 
-Configura el webhook de Chatwoot a `https://<tu-host>/webhook/chatwoot?token=<WEBHOOK_SECRET>`.
+Configura el webhook de Chatwoot a `http://<IP>:8000/webhook/chatwoot?token=<WEBHOOK_SECRET>`.
 
-Detalle paso a paso en **`SETUP.md`**; manual de operación completo en **`CLAUDE.md`**.
+Ruta rápida en **`QUICKSTART.md`**; despliegue detallado en **`SETUP.md`**; manual de
+operación completo en **`CLAUDE.md`**.
 
 ## Documentación
 
+- **`QUICKSTART.md`** — la ruta rápida: de `git clone` a bot corriendo en 6 pasos.
 - **`CLAUDE.md`** — el cerebro: arquitectura, tabla de env vars por tier, recetas de
   operación, reglas de seguridad y primeros pasos. **Empieza por aquí.**
 - **`SETUP.md`** — despliegue end-to-end (DB, Chatwoot, .env, roles, seed, docker, dominio del panel).

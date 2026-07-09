@@ -1,35 +1,77 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  STACK COMPLETO Y AUTO-CONTENIDO
+#  Un `docker compose up -d` levanta TODO: Postgres + Redis + bot + dashboard.
+#  El usuario NO provisiona base de datos ni caché: el stack trae los suyos.
+#  Solo tienes que llenar las KEYS EXTERNAS en .env (ver .env.template / QUICKSTART.md).
+# ══════════════════════════════════════════════════════════════════════════════
+
 services:
+  # ── Postgres INTERNO (sin puerto al host → no molesta ni choca con otros) ──
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: framework
+      POSTGRES_PASSWORD: framework
+      POSTGRES_DB: framework
+    volumes:
+      - framework_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U framework -d framework"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    # NO ports: solo la red interna del stack lo alcanza (db:5432).
+
+  # ── Redis INTERNO (acumulador/debounce; sin puerto al host) ──
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - framework_redis:/data
+    restart: unless-stopped
+    # NO ports: solo la red interna del stack lo alcanza (redis:6379).
+
+  # ── El bot FastAPI (webhook de Chatwoot + loops de fondo) ──
   recruitbot:
     build: .
     image: recruitagent/bot:latest
     env_file: .env
+    environment:
+      # Apuntan SIEMPRE a los servicios internos del stack (nunca provisionas DB/Redis).
+      DATABASE_URL: "postgresql+asyncpg://framework:framework@db:5432/framework"
+      REDIS_URL: "redis://redis:6379/0"
     ports:
-      - "8090:8000"            # host 8090 → Cloudflare tunnel targets this
+      - "8000:8000"            # webhook Chatwoot → http://IP-DEL-SERVIDOR:8000/webhook/chatwoot
     volumes:
       - recruitbot_docs:/data/documents
     restart: unless-stopped
     depends_on:
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
-  # NOTA: el panel (dashboard) ya NO vive aquí — se despliega como STACK DE SWARM
-  # (`dashboard/stack.yml`) en la red traefik_public para rutearse con Traefik en
-  # panel.example.com. La imagen se compila con `docker build ./dashboard`.
-
-  # Acumulador de inputs (debounce 15s) — puerto host no estándar para no chocar
-  # con los otros redis del VPS (chatwoot, fortem, saas usan el 6379 interno).
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
+  # ── Dashboard (IP-first): alcanzable en http://IP-DEL-SERVIDOR:8091 al toque ──
+  #  Para un DOMINIO propio (Traefik + HTTPS) usa dashboard/stack.yml (opcional).
+  dashboard:
+    build: ./dashboard
+    image: recruitagent/dashboard:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://framework:framework@db:5432/framework"
+      REDIS_URL: "redis://redis:6379/0"
+      BOT_INTERNAL_URL: "http://recruitbot:8000"   # aprobar candidatos server-side
     ports:
-      - "16380:6379"           # host 16380 → contenedor 6379
-    volumes:
-      - recruitbot_redis:/data
-    command: redis-server --appendonly yes
-
-# DB host = postgres.example.com (external) and Chatwoot = public URL,
-# so the bot only needs outbound internet — default bridge is enough.
-# In prod you'll add Traefik labels + a real domain instead of the tunnel.
+      - "8091:8000"            # panel → http://IP-DEL-SERVIDOR:8091 (admin / DASH_PASS)
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      recruitbot:
+        condition: service_started
 
 volumes:
+  framework_pgdata:
+  framework_redis:
   recruitbot_docs:
-  recruitbot_redis:
