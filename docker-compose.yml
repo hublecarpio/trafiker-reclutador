@@ -1,0 +1,35 @@
+services:
+  recruitbot:
+    build: .
+    image: recruitagent/bot:latest
+    env_file: .env
+    ports:
+      - "8090:8000"            # host 8090 → Cloudflare tunnel targets this
+    volumes:
+      - recruitbot_docs:/data/documents
+    restart: unless-stopped
+    depends_on:
+      - redis
+
+  # NOTA: el panel (dashboard) ya NO vive aquí — se despliega como STACK DE SWARM
+  # (`dashboard/stack.yml`) en la red traefik_public para rutearse con Traefik en
+  # panel.example.com. La imagen se compila con `docker build ./dashboard`.
+
+  # Acumulador de inputs (debounce 15s) — puerto host no estándar para no chocar
+  # con los otros redis del VPS (chatwoot, fortem, saas usan el 6379 interno).
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "16380:6379"           # host 16380 → contenedor 6379
+    volumes:
+      - recruitbot_redis:/data
+    command: redis-server --appendonly yes
+
+# DB host = postgres.example.com (external) and Chatwoot = public URL,
+# so the bot only needs outbound internet — default bridge is enough.
+# In prod you'll add Traefik labels + a real domain instead of the tunnel.
+
+volumes:
+  recruitbot_docs:
+  recruitbot_redis:

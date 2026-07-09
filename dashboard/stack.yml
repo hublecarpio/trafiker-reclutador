@@ -1,0 +1,42 @@
+# Panel TuEmpresa (solo lectura) como servicio de SWARM, ruteado por Traefik.
+# Deploy:  set -a; . ../.env; set +a; docker stack deploy -c stack.yml botpanel
+# Dominio: https://panel.example.com  (basic-auth: admin / DASH_PASS)
+version: "3.8"
+
+services:
+  dashboard:
+    image: recruitagent/dashboard:latest
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      META_TOKEN: "${META_TOKEN}"
+      CHATWOOT_URL: "${CHATWOOT_URL}"
+      CHATWOOT_ACCOUNT_ID: "${CHATWOOT_ACCOUNT_ID}"
+      CHATWOOT_TOKEN: "${CHATWOOT_TOKEN}"
+      EVOLUTION_URL: "${EVOLUTION_URL}"
+      EVOLUTION_KEY: "${EVOLUTION_KEY}"
+      EVOLUTION_INSTANCE: "${EVOLUTION_INSTANCE}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"
+      LLM_MODEL: "${LLM_MODEL}"
+      DASH_USER: "${DASH_USER}"
+      DASH_PASS: "${DASH_PASS}"
+      DASH_EXTRA_USERS: "${DASH_EXTRA_USERS}"
+      # Aprobación desde el dashboard: llama al bot (host gateway) con el token webhook.
+      BOT_INTERNAL_URL: "http://172.18.0.1:8090"
+      WEBHOOK_SECRET: "${WEBHOOK_SECRET}"
+      # redis del bot (contenedor compose) publicado en el host :16380, alcanzable
+      # desde el overlay por el gateway docker_gwbridge
+      REDIS_URL: "redis://172.18.0.1:16380/0"
+    networks:
+      - traefik_public
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.http.routers.botpanel.entrypoints: "websecure"
+        traefik.http.routers.botpanel.rule: "Host(`panel.example.com`)"
+        traefik.http.routers.botpanel.tls.certresolver: "le"
+        traefik.http.services.botpanel.loadbalancer.server.port: "8000"
+
+networks:
+  traefik_public:
+    external: true

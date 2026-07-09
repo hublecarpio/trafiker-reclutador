@@ -1,0 +1,17 @@
+# secretos — NUNCA commitear
+.env
+.env.*
+!.env.template
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# logs y data local
+*.log
+/data
+data/
+
+# artefactos
+*.zip
